@@ -59,8 +59,8 @@ ENV CAII_OPENAI_BASE_URL="" \
 EXPOSE 8080
 WORKDIR /home/cdsw
 
-LABEL com.cloudera.ml.runtime.edition="opencode-qwen-caii"
-LABEL com.cloudera.ml.runtime.full-version="2.0.0-opencode-caii"
+LABEL com.cloudera.ml.runtime.edition="opencode"
+LABEL com.cloudera.ml.runtime.full-version="2.0.1-opencode"
 LABEL com.cloudera.ml.runtime.short-version="2.0"
-LABEL com.cloudera.ml.runtime.maintenance-version="0"
-LABEL com.cloudera.ml.runtime.description="OpenCode CLI with Qwen via Cloudera AI Inference (OpenAI-compatible API)"
+LABEL com.cloudera.ml.runtime.maintenance-version="1"
+LABEL com.cloudera.ml.runtime.description="OpenCode CLI for Cloudera AI Inference (OpenAI-compatible API; model is user-configured)"

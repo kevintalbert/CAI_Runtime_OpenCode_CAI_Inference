@@ -1,16 +1,16 @@
-# CAI Community Runtime — OpenCode with Qwen via Cloudera AI Inference
+# CAI Community Runtime — OpenCode with Cloudera AI Inference
 
-Run [OpenCode](https://github.com/anomalyco/opencode) (open-source terminal coding agent) inside a **Cloudera AI (CAI)** workspace. Point it at **Cloudera AI Inference service (CAII)** with an **OpenAI-compatible** route ([overview](https://docs.cloudera.com/machine-learning/cloud/ai-inference/topics/ml-caii-use-caii.html)); this README currently centers **`Qwen/Qwen3.6-27B`** as the suggested HF model. This image does **not** bundle local GPU inference.
+Run [OpenCode](https://github.com/anomalyco/opencode) (open-source terminal coding agent) inside a **Cloudera AI (CAI)** workspace. Point it at **Cloudera AI Inference (CAII)** using an **OpenAI-compatible** route ([overview](https://docs.cloudera.com/machine-learning/cloud/ai-inference/topics/ml-caii-use-caii.html)). **You choose the model** your CAII deployment serves (Hugging Face + vLLM, NVIDIA NIM, or other supported formats); this image wires OpenCode to that endpoint and does **not** bundle local GPU inference.
 
 ---
 
-## What you can deploy on CAII (relevant to Qwen)
+## What you can deploy on CAII
 
 Per [Supported Model Artifact Formats](https://docs.cloudera.com/machine-learning/cloud/ai-inference/topics/ml-caii-supported-model-artifact-formats.html), CAII supports:
 
 - **NVIDIA NIM**–packaged LLMs (and other modalities).
 - **Hugging Face transformer** models served by the **vLLM** engine.
-- **ONNX** predictive models from Cloudera AI Workbench (not applicable to Qwen chat).
+- **ONNX** predictive models from Cloudera AI Workbench (typically not used for chat-style coding agents).
 
 You **cannot** assume arbitrary artifacts (for example **GGUF-only** checkpoints for llama.cpp) are importable into CAII; align with the formats above and your platform’s Model Hub entries.
 
@@ -18,11 +18,21 @@ To pull a Hugging Face model into the registry, use **Model Hub → Import** ([d
 
 ---
 
-## Recommended Qwen model (current default)
+## Choosing and sizing a model
 
-**Suggested for now:** [`Qwen/Qwen3.6-27B`](https://huggingface.co/Qwen/Qwen3.6-27B) — **27B multimodal** (vision + language), strong **agentic coding** and long context in Qwen’s benchmarks, Apache-2.0. The model card targets **vLLM ≥ 0.19.0** and documents serving with **`--reasoning-parser qwen3`** and, for OpenCode-style tool use, **`--enable-auto-tool-choice --tool-call-parser qwen3_coder`**. Set **`CAII_MODEL`** to the same string your CAII route registers (usually `Qwen/Qwen3.6-27B`).
+1. **Register what CAII can serve** — Pick a checkpoint or NIM product that matches your **CAII Hugging Face / NIM runtime** versions (vLLM, transformers, CUDA). If the engine is too old for the model’s requirements, the endpoint will fail at startup regardless of GPU size.
 
-**Before you import:** confirm your **CAII Hugging Face runtime** image bundles a **new enough vLLM + transformers** stack for Qwen3.6; if the server is too old, the endpoint will fail at startup regardless of GPU size. Match **tensor parallel size**, **`--max-model-len`**, and GPU count to your **resource profile** (the card’s examples use high parallelism and large context; scale down for smaller clusters). For **text-only** workloads you can use **`--language-model-only`** on vLLM to reduce VRAM (see the model card).
+2. **`CAII_MODEL` must match the route** — Use the exact model id your **OpenAI**-compatible route expects (often the Hugging Face repo id for HF imports, or the name shown in **Test Model** / your operator’s docs for NIM).
+
+3. **Read the model card or vendor docs** — Note **tensor parallel** recommendations, **max context**, **precision** (e.g. FP8 variants), and whether the checkpoint is **multimodal** (vision encoder VRAM) vs **language-only**.
+
+4. **Tool calling** — If you want OpenCode’s agent-style **function calling**, the server must expose OpenAI-compatible tools with matching **vLLM** (or NIM) flags. See [OpenCode error: tool choice](#opencode-error-auto-tool-choice-requires---enable-auto-tool-choice-and---tool-call-parser) below.
+
+---
+
+## Sizing tips (typical HF + vLLM on CAII)
+
+These apply to **any** large language model you serve; substitute flags from **your** model’s documentation where examples use placeholders.
 
 ### If you have **2× GPU** (e.g. 2× L40S on `g6e.12xlarge`)
 
@@ -30,35 +40,25 @@ To pull a Hugging Face model into the registry, use **Model Hub → Import** ([d
 
 2. **Tensor parallel** — Set **`--tensor-parallel-size 2`** in **vLLM Args** so weights shard across **both** GPUs. Without this, vLLM often loads on **one** GPU and you get **OOM** or unstable behavior.
 
-3. **Context cap** — Do **not** start with the card’s **262k** context on two consumer/datacenter GPUs. Begin with a **much smaller** **`--max-model-len`** (for example **32768** or **65536**) and **raise only after** `kserve-container` logs show stable headroom. KV cache grows with context; this is usually the first knob when 2× GPU is “enough for weights” but not for long chats.
+3. **Context cap** — Do **not** start with the largest context the model card mentions unless you have verified KV cache headroom. Begin with a **moderate** **`--max-model-len`** (for example **32768** or **65536**) and **raise only after** `kserve-container` logs show stable headroom. KV cache grows with context; this is usually the first knob when 2× GPU is “enough for weights” but not for long chats.
 
-4. **Precision** — Prefer a **FP8** registry variant if Model Hub lists **`Qwen/Qwen3.6-27B-FP8`** (or equivalent); it materially improves fit vs BF16 on **2×48 GB**-class setups.
+4. **Precision** — Prefer an **FP8** (or other quantized) registry variant when Model Hub lists one; it often improves fit vs BF16 on **2×48 GB**-class setups.
 
-5. **Vision** — If you only need **text / code**, add **`--language-model-only`** so vLLM skips the vision encoder and frees VRAM for the LM + KV.
+5. **Multimodal models** — If you only need **text / code**, many vLLM builds support **`--language-model-only`** (or equivalent) so the vision stack is skipped and VRAM goes to the LM + KV. Confirm in your model card and vLLM version.
 
-6. **OpenCode + tools** — When CAII allows vLLM flags, align tool calling with the [model card](https://huggingface.co/Qwen/Qwen3.6-27B), for example:
+6. **OpenCode + tools** — When CAII allows vLLM args, set **`--enable-auto-tool-choice`** and a **`--tool-call-parser`** value that matches **your** model family (see [vLLM tool calling](https://docs.vllm.ai/en/latest/features/tool_calling/)). Example shape (values are illustrative—copy from your model card, not this README):
 
    ```text
-   --tensor-parallel-size 2 --max-model-len 65536 --reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_coder
+   --tensor-parallel-size 2 --max-model-len 65536 --enable-auto-tool-choice --tool-call-parser <parser-from-model-card>
    ```
 
-   Tune **`--max-model-len`** (and add **`--language-model-only`** or **FP8**) per your OOM logs. If you **cannot** set server args, use this repo’s default **`tool_call: false`** (see below) so OpenCode still talks to the model.
+   Tune **`--max-model-len`** and precision flags per your OOM logs. If you **cannot** set server args, use this repo’s default **`tool_call: false`** (see below) so OpenCode still talks to the model.
 
-7. **If it still does not fit** — Reduce **`max-model-len`**, insist on **FP8**, or fall back to a **smaller** Qwen (see the table below) until the stack is healthy.
-
-### Other Qwen options (HF [Qwen org](https://huggingface.co/Qwen))
-
-| Model | When to use |
-|-------|-------------|
-| **`Qwen/Qwen3-Coder-30B-A3B-Instruct`** (+ **‑FP8** if listed) | MoE coder specialist; can be **tight on 48 GB** or older vLLM—see troubleshooting below. |
-| **`Qwen/Qwen3-Coder-Next`** | Newest coder-focused **~80B** class; only if your platform explicitly supports it. |
-| **`Qwen/Qwen2.5-Coder-32B-Instruct`** | **Older vLLM** stacks where Qwen3.6 is not supported yet. |
-
-Your **OpenCode `CAII_MODEL`** value must match whatever id your CAII **OpenAI** route expects (often the Hugging Face repo id), not only the endpoint hostname.
+7. **If it still does not fit** — Reduce **`max-model-len`**, use a smaller / more efficient checkpoint, or switch to **NIM** if your org offers a suitable curated bundle.
 
 ---
 
-## When an HF + vLLM model (e.g. **`Qwen3-Coder-30B-A3B-Instruct`**) stays **In-progress** (503 / 500 / restarts)
+## When an HF + vLLM model stays **In-progress** (503 / 500 / restarts)
 
 Adding **CPU/RAM** alone rarely fixes HF+vLLM startup failures. The predictor pod can still return **503** (not ready) or **500** (application error) while **`kserve-container`** crashes, restarts, or never finishes loading the engine.
 
@@ -88,11 +88,11 @@ Also consider capping context so KV cache fits after load, for example:
 
 ### 3. Try a different **model artifact** (easier to serve or better match)
 
-| Approach | HF model id (typical) | When to use |
-|----------|------------------------|-------------|
-| **Current default** | `Qwen/Qwen3.6-27B` | Prefer this **if your CAII stack meets vLLM ≥ 0.19.0** and you want a **single strong** open-weight line for coding + multimodal (see [model card](https://huggingface.co/Qwen/Qwen3.6-27B)). |
-| **FP8 weights** | `Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8` | Less VRAM per GPU for the **30B MoE coder** if your registry lists it. |
-| **Smaller coder (sanity check)** | e.g. `Qwen/Qwen2.5-Coder-7B-Instruct` | Proves **HF + vLLM + OpenCode** end-to-end on a tiny checkpoint. |
+| Approach | Typical id / source | When to use |
+|----------|---------------------|-------------|
+| **Smaller HF checkpoint** | Any compact instruct or coder model your registry lists | Proves **HF + vLLM + OpenCode** end-to-end before scaling up. |
+| **FP8 or other efficient variant** | Same model family with a lighter weight tag in Model Hub | When BF16/full weights do not fit your GPU profile. |
+| **Newer stack or different checkpoint** | Another release that matches your pinned **vLLM** image | When logs show **version / architecture** mismatches. |
 | **NVIDIA NIM** | Curated models your org exposes | If [NIM](https://docs.cloudera.com/machine-learning/cloud/ai-inference/topics/ml-caii-supported-model-artifact-formats.html) is available, it can avoid “latest HF + pinned vLLM” mismatches. |
 
 ### 4. **500** vs **503** in readiness probes
@@ -118,8 +118,8 @@ None of this changes how you set **`CAII_OPENAI_BASE_URL`**, **`CAII_API_TOKEN`*
 |----------|-------------|
 | `CAII_OPENAI_BASE_URL` | OpenAI-compatible **base URL including `/v1`** for your inference route (see CAII / KServe OpenAI docs for your deployment). |
 | `CAII_API_TOKEN` | Bearer token your gateway expects (store as a secret in CML where possible). |
-| `CAII_MODEL` | Model id for `POST .../chat/completions` (must match the served name). **Example:** `Qwen/Qwen3.6-27B`. |
-| `CAII_MODEL_SUPPORTS_TOOLS` | Optional. Set to `true` / `1` / `yes` only if your CAII deployment enables vLLM tool calling (`--enable-auto-tool-choice` and `--tool-call-parser`). If unset, this runtime writes **`"tool_call": false`** for the CAII model so OpenCode avoids `tool_choice: "auto"` (see below). |
+| `CAII_MODEL` | Model id for `POST .../chat/completions` (must match the served name—often the HF repo id or the NIM model name your route registers). |
+| `CAII_MODEL_SUPPORTS_TOOLS` | Optional. Set to `true` / `1` / `yes` only if your CAII deployment enables tool calling (`--enable-auto-tool-choice` and a compatible `--tool-call-parser` for vLLM, or equivalent for NIM). If unset, this runtime writes **`"tool_call": false`** for the CAII model so OpenCode avoids `tool_choice: "auto"` (see below). |
 
 ### 3. Start OpenCode
 
@@ -141,7 +141,7 @@ See [OpenCode install & config](https://opencode.ai/docs) and [providers / custo
 
 ### OpenCode error: `"auto" tool choice requires --enable-auto-tool-choice and --tool-call-parser`
 
-OpenCode is a **coding agent**: it sends **OpenAI tool / function-calling** traffic (`tool_choice: "auto"`). **vLLM** only accepts that if the server was started with **tool-call** flags. **NIM** endpoints (for example Llama Nemotron) often ship with this already wired; **Hugging Face + vLLM** deployments on CAII usually **do not**, so chat fails even when the endpoint is **Running**.
+OpenCode is a **coding agent**: it sends **OpenAI tool / function-calling** traffic (`tool_choice: "auto"`). **vLLM** only accepts that if the server was started with **tool-call** flags. **NIM** endpoints often ship with this already wired; **Hugging Face + vLLM** deployments on CAII usually **do not**, so chat fails even when the endpoint is **Running**.
 
 **Fix (CAII → model version → Advanced Options → vLLM Args):** add at least:
 
@@ -149,21 +149,7 @@ OpenCode is a **coding agent**: it sends **OpenAI tool / function-calling** traf
 --enable-auto-tool-choice --tool-call-parser hermes
 ```
 
-For **Qwen2.5**-family models (including many **Qwen2-VL** / `Qwen2.5-*` instruct checkpoints), vLLM documents **Hermes-style** templates and recommends the **`hermes`** parser ([vLLM tool calling — Qwen](https://docs.vllm.ai/en/latest/features/tool_calling/#qwen-models)).
-
-For **`Qwen3-Coder-*`** checkpoints, vLLM documents **`qwen3_xml`** instead:
-
-```text
---enable-auto-tool-choice --tool-call-parser qwen3_xml
-```
-
-For **`Qwen/Qwen3.6-27B`** (and the Qwen3.6 family on the [official model card](https://huggingface.co/Qwen/Qwen3.6-27B)), Qwen recommends **vLLM ≥ 0.19.0**, a **`qwen3`** reasoning parser for default “thinking” behavior, and **`qwen3_coder`** (not `hermes`) for **tool use**, for example:
-
-```text
---reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_coder
-```
-
-The card’s full examples also set **`--tensor-parallel-size`** and **`--max-model-len`** to match your GPU count and memory; your CAII profile must align with those constraints.
+The **`hermes`** parser is a common default for many instruction-tuned models on vLLM; it is **not** universal. For your exact checkpoint, use the **model card** and [vLLM tool calling](https://docs.vllm.ai/en/latest/features/tool_calling/) to pick the supported **`--tool-call-parser`** (and any **`--reasoning-parser`** or related flags your stack documents).
 
 Exact flag names and supported parser values depend on the **vLLM version** inside your **huggingface** runtime image (`huggingfaceserver:…`). If a parser is rejected at startup, check that image’s vLLM release notes or try the closest option your version lists (`vllm serve --help` in a debug context). Redeploy the model after saving vLLM args.
 
@@ -179,10 +165,12 @@ After someone enables tool calling on the server, set **`CAII_MODEL_SUPPORTS_TOO
 
 ## Building the image
 
+The Dockerfile sets Cloudera runtime labels: **edition** `opencode`, **full-version** `2.0.1-opencode` (short **2.0**, maintenance **1**). Use any registry tag you prefer; the example below matches that release.
+
 ```bash
 docker build --pull --rm \
   -f Dockerfile \
-  -t <your-registry>/cai-opencode-qwen-caii:2.0.0 .
+  -t <your-registry>/cai-opencode:2.0.1 .
 ```
 
 ---
